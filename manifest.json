@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Video Item Remover",
+  "description": "Right-click YouTube video items and remove them from the current page.",
+  "version": "0.1.0",
+  "permissions": [
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "*://www.youtube.com/*",
+    "*://youtube.com/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://www.youtube.com/*",
+        "*://youtube.com/*"
+      ],
+      "js": [
+        "src/content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}
