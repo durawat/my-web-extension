@@ -21,11 +21,15 @@ jobs:
         id: version
         run: echo "version=$(jq -r '.version' manifest.json)" >> "$GITHUB_OUTPUT"
 
+      - name: Generate icons
+        run: python3 icons/generate-icons.py
+
       - name: Create zip
         run: |
           zip -r "youtube-video-item-remover-v${{ steps.version.outputs.version }}.zip" \
             manifest.json \
-            src/
+            src/ \
+            icons/*.png
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
