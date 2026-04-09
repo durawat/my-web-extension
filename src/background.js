@@ -1,4 +1,9 @@
 const REMOVE_VIDEO_ITEM_MENU_ID = "remove-youtube-video-item";
+const BLOCK_CHANNEL_MENU_ID = "block-youtube-channel";
+const YOUTUBE_URL_PATTERNS = ["*://www.youtube.com/*", "*://youtube.com/*"];
+
+// In-memory store: channelHref → channelName (cleared if service worker is suspended)
+const blockedChannels = new Map();
 
 function createContextMenu() {
   chrome.contextMenus.removeAll(() => {
@@ -10,17 +15,23 @@ function createContextMenu() {
 
     chrome.contextMenus.create({
       id: REMOVE_VIDEO_ITEM_MENU_ID,
-      title: "Remove YouTube video item",
+      title: "Remove video from page",
       contexts: ["all"],
-      documentUrlPatterns: [
-        "*://www.youtube.com/*",
-        "*://youtube.com/*"
-      ]
+      documentUrlPatterns: YOUTUBE_URL_PATTERNS,
     }, () => {
-      const createError = chrome.runtime.lastError;
+      if (chrome.runtime.lastError) {
+        console.error("Failed to create remove menu:", chrome.runtime.lastError.message);
+      }
+    });
 
-      if (createError) {
-        console.error("Failed to create context menu:", createError.message);
+    chrome.contextMenus.create({
+      id: BLOCK_CHANNEL_MENU_ID,
+      title: "Block channel (hide all videos)",
+      contexts: ["all"],
+      documentUrlPatterns: YOUTUBE_URL_PATTERNS,
+    }, () => {
+      if (chrome.runtime.lastError) {
+        console.error("Failed to create block menu:", chrome.runtime.lastError.message);
       }
     });
   });
@@ -34,19 +45,73 @@ chrome.runtime.onStartup.addListener(() => {
   createContextMenu();
 });
 
+function getChannelsArray() {
+  return Array.from(blockedChannels.entries()).map(([href, name]) => ({ href, name }));
+}
+
+async function broadcastBlockedChannels() {
+  const channels = getChannelsArray();
+  const tabs = await chrome.tabs.query({ url: YOUTUBE_URL_PATTERNS });
+
+  for (const tab of tabs) {
+    chrome.tabs.sendMessage(tab.id, {
+      type: "BLOCKED_CHANNELS_UPDATED",
+      channels,
+    }).catch(() => {});
+  }
+}
+
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (info.menuItemId !== REMOVE_VIDEO_ITEM_MENU_ID || !tab?.id) {
+  if (!tab?.id) return;
+
+  if (info.menuItemId === REMOVE_VIDEO_ITEM_MENU_ID) {
+    const response = await chrome.tabs.sendMessage(tab.id, {
+      type: "REMOVE_CONTEXT_VIDEO_ITEM",
+    }).catch((error) => {
+      console.error("Failed to reach the YouTube content script:", error);
+      return null;
+    });
+
+    if (!response?.ok) {
+      console.info("Remove request was not applied.", response?.reason ?? "unknown");
+    }
     return;
   }
 
-  const response = await chrome.tabs.sendMessage(tab.id, {
-    type: "REMOVE_CONTEXT_VIDEO_ITEM"
-  }).catch((error) => {
-    console.error("Failed to reach the YouTube content script:", error);
-    return null;
-  });
+  if (info.menuItemId === BLOCK_CHANNEL_MENU_ID) {
+    const response = await chrome.tabs.sendMessage(tab.id, {
+      type: "BLOCK_CONTEXT_CHANNEL",
+    }).catch((error) => {
+      console.error("Failed to reach the YouTube content script:", error);
+      return null;
+    });
 
-  if (!response?.ok) {
-    console.info("Remove request was not applied.", response?.reason ?? "unknown");
+    if (response?.ok) {
+      blockedChannels.set(response.channelHref, response.channelName);
+      broadcastBlockedChannels();
+    } else {
+      console.info("Block channel request was not applied.", response?.reason ?? "unknown");
+    }
+  }
+});
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "GET_BLOCKED_CHANNELS") {
+    sendResponse({ channels: getChannelsArray() });
+    return true;
+  }
+
+  if (message?.type === "UNBLOCK_CHANNEL") {
+    blockedChannels.delete(message.channelHref);
+    broadcastBlockedChannels();
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (message?.type === "CLEAR_BLOCKED_CHANNELS") {
+    blockedChannels.clear();
+    broadcastBlockedChannels();
+    sendResponse({ ok: true });
+    return true;
   }
 });

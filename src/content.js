@@ -1,6 +1,7 @@
 const VIDEO_LINK_SELECTOR = ['a[href*="/watch"]', 'a[href*="/shorts/"]'].join(
   ", ",
 );
+const CHANNEL_LINK_SELECTOR = 'a[href*="/@"], a[href*="/channel/"]';
 
 const TOAST_ID = "youtube-video-item-remover-toast";
 const TRACE_DEBUG_FLAG = "__REMOVE_YOUTUBE_VIDEO_ITEM_TRACE__";
@@ -8,6 +9,8 @@ const TRACE_DEBUG_PREFIX = "[RemoveYouTubeVideoItemTrace]";
 
 let lastContextMenuState = null;
 let toastTimeoutId = null;
+let blockedChannelHrefs = new Set();
+let sweepScheduled = false;
 
 const traceDebug = (() => {
   if (typeof window[TRACE_DEBUG_FLAG] !== "boolean") {
@@ -257,14 +260,110 @@ document.addEventListener("contextmenu", trackContextMenuTarget, true);
 window.addEventListener("yt-navigate-start", clearTrackedContext, true);
 window.addEventListener("popstate", clearTrackedContext, true);
 
+// --- Channel blocking ---
+
+function extractChannelFromElement(element) {
+  if (!isElement(element)) return null;
+
+  const link = element.matches(CHANNEL_LINK_SELECTOR)
+    ? element
+    : (element.closest(CHANNEL_LINK_SELECTOR) ?? element.querySelector(CHANNEL_LINK_SELECTOR));
+
+  if (!link) return null;
+
+  const href = (link.getAttribute("href") ?? "").split("?")[0].split("#")[0] || null;
+  const name = link.textContent?.trim() || href;
+  return href ? { href, name } : null;
+}
+
+function getChannelFromLastContext() {
+  if (!lastContextMenuState) return null;
+  return (
+    extractChannelFromElement(lastContextMenuState.targetNode) ??
+    extractChannelFromElement(lastContextMenuState.removableItem)
+  );
+}
+
+function blockContextChannel() {
+  const channel = getChannelFromLastContext();
+
+  if (!channel) {
+    showToast("Could not detect a channel from the right-clicked item.", "error");
+    return { ok: false, reason: "no-channel" };
+  }
+
+  const videoItem = resolveTrackedVideoItem();
+  if (videoItem) {
+    videoItem.remove();
+    clearTrackedContext();
+  }
+
+  showToast(`Blocking \u201C${channel.name}\u201D \u2014 new videos will be hidden automatically.`, "success");
+  return { ok: true, channelHref: channel.href, channelName: channel.name };
+}
+
+function sweepBlockedChannels() {
+  sweepScheduled = false;
+  if (blockedChannelHrefs.size === 0) return;
+
+  const seen = new WeakSet();
+  document.querySelectorAll(VIDEO_LINK_SELECTOR).forEach((videoLink) => {
+    const item = findVideoItemFromNode(videoLink);
+    if (!item || seen.has(item)) return;
+    seen.add(item);
+
+    const channel = extractChannelFromElement(item);
+    if (channel?.href && blockedChannelHrefs.has(channel.href)) {
+      item.remove();
+    }
+  });
+}
+
+function scheduleSweep() {
+  if (sweepScheduled || blockedChannelHrefs.size === 0) return;
+  sweepScheduled = true;
+  setTimeout(sweepBlockedChannels, 100);
+}
+
+function updateBlockedChannels(channels) {
+  blockedChannelHrefs = new Set(channels.map((c) => c.href));
+  scheduleSweep();
+}
+
+const channelMutationObserver = new MutationObserver(scheduleSweep);
+channelMutationObserver.observe(document.documentElement, {
+  childList: true,
+  subtree: true,
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   traceDebug("runtimeMessage:received", { message, sender });
 
-  if (message?.type !== "REMOVE_CONTEXT_VIDEO_ITEM") {
-    traceDebug("runtimeMessage:ignored", { messageType: message?.type });
+  if (message?.type === "REMOVE_CONTEXT_VIDEO_ITEM") {
+    traceDebug("runtimeMessage:remove-request");
+    sendResponse(removeTrackedVideoItem());
     return;
   }
 
-  traceDebug("runtimeMessage:remove-request");
-  sendResponse(removeTrackedVideoItem());
+  if (message?.type === "BLOCK_CONTEXT_CHANNEL") {
+    traceDebug("runtimeMessage:block-channel-request");
+    sendResponse(blockContextChannel());
+    return;
+  }
+
+  if (message?.type === "BLOCKED_CHANNELS_UPDATED") {
+    traceDebug("runtimeMessage:blocked-channels-update", { channels: message.channels });
+    updateBlockedChannels(message.channels ?? []);
+    return;
+  }
+
+  traceDebug("runtimeMessage:ignored", { messageType: message?.type });
 });
+
+// Request the current blocked channels list on load so the MutationObserver
+// starts with the right state if the service worker is already running.
+chrome.runtime.sendMessage({ type: "GET_BLOCKED_CHANNELS" })
+  .then((response) => {
+    if (response?.channels) updateBlockedChannels(response.channels);
+  })
+  .catch(() => {});

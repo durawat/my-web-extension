@@ -4,7 +4,8 @@
   "description": "Right-click YouTube video items and remove them from the current page.",
   "version": "0.1.0",
   "permissions": [
-    "contextMenus"
+    "contextMenus",
+    "tabs"
   ],
   "host_permissions": [
     "*://www.youtube.com/*",
@@ -17,6 +18,7 @@
     "128": "icons/icon-128.png"
   },
   "action": {
+    "default_popup": "src/popup.html",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png",
